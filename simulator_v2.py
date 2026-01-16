@@ -95,6 +95,11 @@ def plot_trajectories(output_dir, map_size, obs_map, uav_trajectories, target_tr
     plt.figure(figsize=(8, 8))
     if obs_map is not None:
         plt.imshow(obs_map == -1, cmap="gray_r", origin="upper")
+        obstacle_indices = np.argwhere(obs_map == -1)
+        if obstacle_indices.size > 0:
+            obs_x = obstacle_indices[:, 1] + 0.5
+            obs_y = (map_size[0] - 1) - obstacle_indices[:, 0] + 0.5
+            plt.scatter(obs_x, obs_y, s=20, c="black", marker="s", label="Obstacle")
 
     colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
     for idx, traj in enumerate(uav_trajectories):
@@ -114,8 +119,9 @@ def plot_trajectories(output_dir, map_size, obs_map, uav_trajectories, target_tr
         det_points = np.array(detection_points)
         plt.scatter(det_points[:, 0], det_points[:, 1], s=20, c="red", label="Detection")
 
-    plt.xlim(0, map_size[1])
-    plt.ylim(0, map_size[0])
+    padding = 0.1 * max(map_size)
+    plt.xlim(-padding, map_size[1] - 1 + padding)
+    plt.ylim(-padding, map_size[0] - 1 + padding)
     plt.title("UAV Trajectories & Detections")
     plt.legend(loc="upper right")
     plt.tight_layout()
@@ -340,6 +346,7 @@ def train_with_improvements():
 
         for t in range(MAX_STEPS):
             local_entropy_before = compute_local_entropy_for_uavs(uav_list, predictors)
+            global_entropy_before = sum(p.get_entropy() for p in predictors)
 
             action_list = []
             obs_list = []
@@ -396,6 +403,8 @@ def train_with_improvements():
                 real_targets[i].step_forward()
 
             local_entropy_after = compute_local_entropy_for_uavs(uav_list, predictors)
+            global_entropy_after = sum(p.get_entropy() for p in predictors)
+            global_entropy_delta = global_entropy_before - global_entropy_after
 
             # 观测下一帧 & 计算奖励
             for i, uav in enumerate(uav_list):
@@ -404,13 +413,14 @@ def train_with_improvements():
                 uav.last_obs = next_obs
 
                 r = uav.calculate_reward(
-                    prev_entropy=local_entropy_before[i],
-                    curr_entropy=local_entropy_after[i],
+                    local_entropy_delta=local_entropy_before[i] - local_entropy_after[i],
+                    global_entropy_delta=global_entropy_delta,
                     is_detected=uav_detection_states[i],
                     action=action_list[i],
                     map_size=map_size,
                     obstacles_map=obs_map,
-                    all_uavs=uav_list
+                    all_uavs=uav_list,
+                    num_uavs=num_uavs
                 )
 
                 r_input = np.array([r])
@@ -432,7 +442,10 @@ def train_with_improvements():
                 for _ in range(2):
                     RL.train_centralized(uav_list, global_buffer, BATCH_SIZE)
 
-        noise_std = max(min_noise, noise_std * noise_decay)
+        if episode >= int(MAX_EPISODES * 0.85):
+            noise_std = max(0.01, noise_std * noise_decay * 0.95)
+        else:
+            noise_std = max(min_noise, noise_std * noise_decay)
         avg_reward = episode_reward / len(uav_list)
         reward_history.append(avg_reward)
         noise_history.append(noise_std)

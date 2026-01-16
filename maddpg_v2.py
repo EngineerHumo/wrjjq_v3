@@ -59,15 +59,20 @@ class Actor(nn.Module):
     """演员网络：只输入自己的 state"""
     def __init__(self, state_dim, action_dim, max_action):
         super(Actor, self).__init__()
-        self.l1 = nn.Linear(state_dim, 400)
-        self.l2 = nn.Linear(400, 300)
-        self.l3 = nn.Linear(300, action_dim)
+        self.l1 = nn.Linear(state_dim, 512)
+        self.ln1 = nn.LayerNorm(512)
+        self.l2 = nn.Linear(512, 256)
+        self.ln2 = nn.LayerNorm(256)
+        self.l3 = nn.Linear(256, 256)
+        self.ln3 = nn.LayerNorm(256)
+        self.l4 = nn.Linear(256, action_dim)
         self.max_action = max_action
 
     def forward(self, state):
-        a = F.relu(self.l1(state))
-        a = F.relu(self.l2(a))
-        return self.max_action * torch.tanh(self.l3(a))
+        a = F.relu(self.ln1(self.l1(state)))
+        a = F.relu(self.ln2(self.l2(a)))
+        a = F.relu(self.ln3(self.l3(a)))
+        return self.max_action * torch.tanh(self.l4(a))
 
 
 class Critic(nn.Module):
@@ -399,15 +404,9 @@ class UAVAgent:
         next_x = self.pos[0] + dx
         next_y = self.pos[1] + dy
 
-        # 4. 边界处理 (反弹)
-        # 如果撞墙，不仅位置限制，角度也要反射
-        if next_x < 0 or next_x >= N:
-            self.phi = np.pi - self.phi  # 水平镜像反弹
-            next_x = np.clip(next_x, 0, N - 0.1)
-
-        if next_y < 0 or next_y >= M:
-            self.phi = -self.phi  # 垂直镜像反弹
-            next_y = np.clip(next_y, 0, M - 0.1)
+        # 4. 边界处理 (不再反弹，保持转向角速度约束)
+        # 允许越界，交由奖励函数进行惩罚
+        # 位置不裁剪，避免瞬时大角度反射
 
         # 5. 障碍物处理
         if obstacles_map is not None:
@@ -433,13 +432,25 @@ class UAVAgent:
         bid = 0.5 * priority / 5 - 0.5 * (time_cost / 1200.0)  # 归一化处理
         return bid
 
-    def calculate_reward(self, prev_entropy, curr_entropy, is_detected, action, map_size, obstacles_map, all_uavs):
+    def calculate_reward(
+        self,
+        local_entropy_delta,
+        global_entropy_delta,
+        is_detected,
+        action,
+        map_size,
+        obstacles_map,
+        all_uavs,
+        num_uavs,
+        alpha=1.0,
+        beta=0.2
+    ):
         """
         最小化熵 + 探测保持 + 安全约束
         """
         # 1. 信息增益 (熵减)
         # 放大系数 10.0 是经验值（调节RL收敛速度），不影响物理参数
-        r_info = (prev_entropy - curr_entropy) * 10.0
+        r_info = 10.0 * (alpha * local_entropy_delta + beta * (global_entropy_delta / max(num_uavs, 1)))
 
         # 2. 探测奖励 (Detection)
         # 探测到目标给予高额奖励
@@ -464,6 +475,8 @@ class UAVAgent:
             r_collision -= (y - (M - margin)) / margin * 2.0
         if x < 0 or x >= N or y < 0 or y >= M:
             r_collision -= 10.0
+            out_distance = max(0.0, -x) + max(0.0, x - (N - 1)) + max(0.0, -y) + max(0.0, y - (M - 1))
+            r_collision -= 0.05 * out_distance
 
         # 障碍物约束
         if obstacles_map is not None:
